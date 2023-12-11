@@ -1,0 +1,493 @@
+from selenium import webdriver
+import requests
+from ast import literal_eval
+import time
+from bs4 import BeautifulSoup
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+import time
+from selenium.common.exceptions import TimeoutException
+from urllib3.exceptions import ProtocolError
+import requests
+from airtable import Airtable
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
+
+# Airtable Config
+API_KEY = 'keypRV2FeRUvc7Zej'
+BASE_ID = 'appZWhRfPBEQYLEuM'
+TABLE_NAME = 'Source Accounts'
+LEADS_TABLE_NAME = 'Leads'
+
+airtable = Airtable(BASE_ID, LEADS_TABLE_NAME, api_key=API_KEY)
+
+def get_urls_from_airtable():
+    user_url = None  
+    record_id = None
+    
+    try:
+        # Fetch one record where Followers > 1000 and Bot Processed is false
+        formula = "AND(Followers>1000, NOT({Bot Processed}), LEN({Link in bio}) > 0)"
+        records = airtable.get_all(formula=formula, maxRecords=1)
+        
+        banned_strings = ['tiktok.com', 't.me', 'youtube.com', 'twitter.com', 'amazon', 'facebook.com', 'lovehoney', 'youtu.be']
+        
+        if records:
+            record = records[0]
+            user_url = record['fields'].get('Link in bio', '').strip()
+            record_id = record['id']
+            
+            # Check if the URL contains any of the banned strings
+            if any(banned_string in user_url for banned_string in banned_strings):
+                print(f"Skipping record due to banned string in URL: {user_url}")
+                airtable.update(record['id'], {'Bot Processed': True})
+                print(f"Updated record {record['id']}: Bot Processed = True")
+            
+                user_url = None  # Ensure we don’t return a banned URL
+            else:
+                print(f"Processing record {record['id']}: {user_url}")
+        else:
+            print("No applicable records found.")
+        
+    except Exception as e:
+        print(f"An error occurred: {str(e)}")
+    
+    return user_url, record_id  # Ensure a tuple is always returned
+
+found_urls = []
+
+def handle_protocol_error(max_retries=10, delay=5):
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            for i in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except ProtocolError:
+                    print(f"Connection error occurred. Attempt {i+1} failed. Waiting for {delay} seconds before retrying...")
+                    time.sleep(delay)
+            print(f"Failed after {max_retries} retries. Please check your connection.")
+            return None
+        return wrapper
+    return decorator
+
+@handle_protocol_error()
+def openstatistics(incogniton_profile_id):
+    # Connect to Incogniton and get session details
+    incogniton_url = 'http://127.0.0.1:35000/automation/launch/python/' + incogniton_profile_id
+    
+    resp = requests.get(incogniton_url)
+    incomingJson = resp.json()
+
+    driver = webdriver.Remote(
+        command_executor=incomingJson['url'],
+        desired_capabilities=literal_eval(incomingJson['dataDict'])
+    )
+
+    driver.set_page_load_timeout(10)  # set timeout to 10 seconds
+    return driver
+
+@handle_protocol_error()
+def close_other_tabs(driver):
+    # Open a new tab
+    driver.execute_script("window.open('', '_blank');")
+    
+    # Switch to the new window
+    driver.switch_to.window(driver.window_handles[-1])
+    new_handle = driver.current_window_handle
+    
+    # Close all other tabs
+    for handle in driver.window_handles:
+        if handle != new_handle:
+            driver.switch_to.window(handle)
+            driver.close()
+    
+    # Ensure we're switched to the new tab
+    driver.switch_to.window(new_handle)
+
+@handle_protocol_error()
+def getlinks(driver, user_url):
+    @handle_protocol_error()
+    def extract_and_close_tabs(driver, current_handle, found_urls):
+        all_handles = driver.window_handles  # This should be a list, not a dictionary
+        for handle in all_handles:
+            if handle != current_handle:
+                time.sleep(5)
+                driver.switch_to.window(handle)
+                found_urls.append(driver.current_url)
+                driver.close()
+        driver.switch_to.window(current_handle)
+        return found_urls
+
+    @handle_protocol_error()
+    def validateredirect(driver, user_url):
+        # Get the URL from new tab
+        redirect_url = driver.current_url
+        print(f"Redirect URL: {redirect_url}")
+
+        # Check the redirect_url and trigger the respective function
+        if 'https://beacons.ai/' in redirect_url:
+            return beacons_page(driver, user_url)
+
+        elif 'https://allmylinks.com/' in redirect_url:
+            return allmylinks_page(driver, user_url)
+
+        elif 'https://linktr.ee/' in redirect_url:
+            return linktree_page(driver, user_url)
+
+        elif 'https://myslink.app/' in redirect_url:
+            return slink_page(driver, user_url)
+
+        elif 'https://onlyfans.com/' in redirect_url or 'https://fansly.com/' in redirect_url:
+        
+            return redirect_url
+        else:
+            return unknown_page(driver, user_url)
+
+    @handle_protocol_error()
+    def webscrape(driver, tag_name, href_status=True):
+        found_urls = []
+        html_data = driver.page_source
+        soup = BeautifulSoup(html_data, 'html.parser')
+        
+        for element in soup.find_all(tag_name, href=href_status):
+            url = element['href']
+            if url.startswith('http'):
+                found_urls.append(url) # Ensure it's used as a list
+        return found_urls
+
+
+    @handle_protocol_error()
+    def beacons_page(driver, user_url):
+        found_urls = []
+        try:
+            # Ensure webscrape function is defined and handles its own possible exceptions
+            found_urls = webscrape(driver, 'a', True)
+
+        except Exception as e: 
+            # Handle any error that might occur and continue
+            pass
+
+        return found_urls
+
+    @handle_protocol_error()
+    def allmylinks_page(driver, user_url):
+        found_urls = []
+        try:
+            # Call webscrape to get the URLs
+            # Ensure webscrape function is defined and handles its own possible exceptions
+            found_urls = webscrape(driver, 'a', True)
+ 
+        except Exception as e: 
+            # Handle any error that might occur and continue
+            pass
+
+        return found_urls
+
+    @handle_protocol_error()
+    def NSFW_page(driver, user_url):
+        print("Entered NSFW_page function")  # Debugging print statement
+        found_urls = []
+        try:
+            redirect_url = driver.current_url
+            found_urls.append((user_url, redirect_url))  # Assuming you want to append a tuple
+        except Exception as e:
+            print(f"Error in NSFW_page: {str(e)}")
+        return found_urls
+
+
+    @handle_protocol_error()
+    def unknown_page(driver, user_url):
+        found_urls = []  # Ensure found_urls is defined
+        
+        try:  # Main try block for handling any unknown error
+            print("Navigated to an Unknown page.")
+
+            # Ensure webscrape function is defined and handles its own possible exceptions
+            found_urls = webscrape(driver, 'a', True)
+     
+        except Exception as e:  # Catching any general error
+            print(f"An unexpected error occurred: {str(e)}. Skipping to the next URL.")
+        finally:
+            # Add any cleanup code if needed, to be executed whether an error occurs or not
+            pass
+
+        return found_urls
+
+    @handle_protocol_error()
+    def slink_page(driver, user_url):
+        found_urls = []  # Ensure found_urls is defined
+        
+        try:  # Main try block for handling any unknown error
+            print("Navigated to a Slink page.")
+            time.sleep(5)
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            slink_sections = soup.find_all('div', class_='slinkItems')
+            ids = [section.get('id') for section in slink_sections if section.get('id')]
+            
+            for id in ids:
+                xpath = f"//div[@id='{id}']"
+                try:
+                    element_to_click = WebDriverWait(driver, 10).until(
+                        EC.element_to_be_clickable((By.XPATH, xpath))
+                    )
+                    element_to_click.click()
+                    print(f"Clicked: {id}")
+                    time.sleep(2.5)  # Allowing some time for potential new tab to open
+                    
+                    # Extracting URLs and closing tabs
+                    current_handle = driver.current_window_handle
+                    found_urls = extract_and_close_tabs(driver, current_handle, found_urls)  # Ensure this function is defined elsewhere
+                    print(f"Extracted URLs: {found_urls}")
+                    
+                    # Navigating back to the user_url after clicking
+                    driver.get(user_url) 
+                    # Removed `time.sleep(0)` as it's redundant
+                except Exception as e:
+                    print(f"Failed to click {id}. Error: {str(e)}")
+                    
+        except Exception as e:  # Catching any general error
+            print(f"An unexpected error occurred: {str(e)}. Skipping to the next URL.")
+        finally:
+            # Add any cleanup code if needed, to be executed whether an error occurs or not
+            pass
+        
+        return found_urls
+
+    @handle_protocol_error()
+    def linktree_page(driver, user_url):
+        found_urls = []
+        popup_continue_button_xpath = "//button[@data-testid='AcceptButton']"
+        Cookies_popup_xath = '//button[@id="onetrust-accept-btn-handler" and text()="Accept"]'
+        blm_button_xpath = '//button[@data-testid="CauseBannerToggle"]'
+    
+        # Trying to click a popup continue button
+        try:
+            WebDriverWait(driver, 3).until(
+                EC.presence_of_element_located((By.XPATH, popup_continue_button_xpath))
+            ).click()
+            time.sleep(5)
+            print("Clicked 'Continue' on the popup.")
+        except TimeoutException:
+            print("No popup appeared or the popup was not clickable within 3 seconds.")
+        try:
+            WebDriverWait(driver, 1).until(
+                EC.presence_of_element_located((By.XPATH, Cookies_popup_xath))
+            ).click()
+            time.sleep(5)
+            print("Clicked 'Continue' on the popup.")
+        except TimeoutException:
+            print("No popup appeared or the popup was not clickable within 3 seconds.")
+        try:
+            WebDriverWait(driver, 2).until(
+                EC.presence_of_element_located((By.XPATH, blm_button_xpath))
+            ).click()
+            print("Clicked 'Continue' on the popup.")
+            time.sleep(5)
+        except TimeoutException:
+            print("No popup appeared or the popup was not clickable within 3 seconds.")
+        
+        html_data = driver.page_source
+        soup = BeautifulSoup(html_data, 'html.parser')
+        div_elements = soup.find_all('div', {'data-id': True})
+        a_elements = soup.find_all('a', href=True)
+        
+        # Appending initial URLs to the found_urls list
+        for a_element in a_elements:
+            found_urls.append(a_element['href'])
+
+        for div_element in div_elements:
+            a_elements = div_element.find_all('a', href=True)
+
+            if not a_elements:
+                data_id = div_element.get('data-id')
+                button_xpath = f"//div[@data-id='{data_id}']//button[@data-testid='LinkButton']"
+
+                try:
+                    # Stage 1: Check if button exists and click it
+                    button = driver.find_element(By.XPATH, button_xpath)
+                    # Get the button's y-coordinate
+                    y = button.location['y']
+
+                    # Get the window's inner height
+                    window_height = driver.execute_script("return window.innerHeight")
+
+                    # Calculate scroll position (subtracting half the window height to center the element)
+                    scroll_y = y - window_height/2
+
+                    # Scroll
+                    driver.execute_script(f"window.scrollTo(0, {scroll_y});")
+
+                    # Wait and click the button
+                    wait = WebDriverWait(driver, 10)  # wait up to 10 seconds
+                    wait.until(EC.element_to_be_clickable((By.XPATH, button_xpath))).click()
+
+                    time.sleep(5)
+
+                    try:
+                        # Scenario 1 & 2: Sensitive content popup exists
+                        sensitive_content_button = WebDriverWait(driver, 3).until(
+                            EC.presence_of_element_located((By.XPATH, "//button[contains(@class, 'sc-pFZIQ') and text()='Continue']"))
+                        )
+                        sensitive_content_button.click()
+                        time.sleep(5)
+
+                        try:
+                            # Scenario 2: Check if DOB inputs exist
+                            DOB_DD_input = WebDriverWait(driver, 3).until(
+                                EC.presence_of_element_located((By.XPATH, "//input[@placeholder='DD' and @class='sc-jrAGrp sc-dFJsGO hBksEw cEXSmc']"))
+                            )
+                            DOB_MM_input = WebDriverWait(driver, 3).until(
+                                EC.presence_of_element_located((By.XPATH, "//input[@placeholder='MM' and @class='sc-jrAGrp sc-dFJsGO hAyzEV cEXSmc']"))
+                            )
+                            DOB_YYYY_input = WebDriverWait(driver, 3).until(
+                                EC.presence_of_element_located((By.XPATH, "//input[@placeholder='YYYY' and @class='sc-jrAGrp sc-dFJsGO dTqIfX kGWbPp']"))
+                            )
+
+                            # Entering DOB details
+                            DOB_DD_input.send_keys("01")
+                            time.sleep(5)
+                            DOB_MM_input.send_keys("01")
+                            time.sleep(5)
+                            DOB_YYYY_input.send_keys("2000")
+                            time.sleep(5)
+                            DOB_YYYY_input.send_keys(Keys.ENTER)
+                            time.sleep(5)
+
+                        except TimeoutException:
+                            # Scenario 1: No DOB check, moving forward
+                            pass
+
+                        # Extract URLs and close tabs for Scenario 1 & 2
+                        current_handle = driver.current_window_handle
+                        found_urls = extract_and_close_tabs(driver, current_handle, found_urls)
+
+                    except TimeoutException:
+                        # Scenario 3: No sensitive screen, but share_link popup exists
+                        try:
+                            share_link_button = WebDriverWait(driver, 3).until(
+                                EC.presence_of_element_located((By.XPATH, "//button[@aria-label='Share Link']"))
+                            )
+                            close_button = WebDriverWait(driver, 3).until(
+                                EC.presence_of_element_located((By.XPATH, "//button[@data-testid='LinkDialog-CloseButton']"))
+                            )
+
+                            if share_link_button and close_button:
+                                close_button.click()
+                                time.sleep(5)
+                        except TimeoutException:
+                            print("No additional xpaths found. Reloading URL.")
+                            driver.get(user_url)
+
+                except TimeoutException:
+                    print("Button on linktree was not found, cannot click")
+
+        # Return found URLs after the loop ends
+        return found_urls
+
+
+    return validateredirect(driver, user_url)
+
+def verify_nsfw_creator(found_urls, record_id):
+    nsfw_sites = ['onlyfans.com', 'fans.ly.com', 'fanvue.com']
+    non_essential_urls_start = [
+        "https://support.allmylinks.com",
+        "https://allmylinks.com",
+        # Add more non-essential URLs here
+    ]
+    
+    # Default return values
+    nsfw_creator = False
+    verified_urls = found_urls
+    print(f"Found URLs: {found_urls}")
+    # Stage 1: Check for NSFW URLs
+    for url in found_urls:  
+        if any(nsfw_site in url for nsfw_site in nsfw_sites):
+            nsfw_creator = True
+            print("Stage 1: NSFW URL found. Proceeding to Stage 2...")
+            break
+    
+    # Always update the Bot Processed field to True
+    data_to_update = {'Bot Processed': True}
+
+    if nsfw_creator:
+        # Joining URLs into a single string with a comma and space as separators
+        data_to_update['URL LIST'] = ', '.join(verified_urls) 
+
+    print(f"UPDATING THIS ---- {data_to_update}")
+
+    # Update the Airtable record
+    try:
+        airtable.update(record_id, data_to_update)
+        print(f"Updated record {record_id}. Bot Processed = True")
+        if nsfw_creator:
+            print(f"Updated URLs: {verified_urls}")
+    except Exception as e:
+        print(f"Error updating record: fuckup")
+
+    
+    return {"NSFW Creator": nsfw_creator, "Verified URLs": verified_urls}
+
+
+@handle_protocol_error()          
+def load_page(driver, user_url):
+    close_other_tabs(driver)
+    found_urls = []
+    try:
+        # Navigate to the URL
+        driver.get(user_url)
+        print("here")
+        try:
+            # Wait up to 20 seconds for the page to be loaded
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
+        except TimeoutException:
+            print("Page load timed out but continuing anyway...")
+        
+        # Assuming `getlinks` returns a list of URLs
+        found_urls = getlinks(driver, user_url)  
+    except Exception as e:
+        # Log error and continue without crashing
+        print(f"An error occurred: {str(e)}")
+    return found_urls
+
+
+@handle_protocol_error()  
+def process_urls(incogniton_profile_id):
+    driver = openstatistics(incogniton_profile_id)
+    
+    try:
+        while True:  # Infinite loop
+            user_url, record_id = get_urls_from_airtable()
+            if not user_url:  
+                print("No valid URL retrieved.")
+                continue  # Skip the rest of this loop iteration and move to the next one
+            
+            found_urls = load_page(driver, user_url)
+            print(found_urls)
+            
+            if 'https://onlyfans.com/' in found_urls or 'https://fansly.com/' in found_urls or 'https://Onlyfans.com/' in found_urls or 'https://Fansly.com/':
+                data_to_update = {'Bot Processed': True, 'URL LIST' : found_urls}
+                airtable.update(record_id, data_to_update)
+                print('nsfw is true ma boy')
+            else:
+                verification_result = verify_nsfw_creator(found_urls, record_id)
+                print(f"NSFW Creator = {verification_result['NSFW Creator']}")
+            print("Verified URLs:")
+            
+            time.sleep(5)  # Pausing execution for 6 seconds
+    finally:  
+        driver.quit()
+
+def main():
+    time.sleep(1)
+    incogniton_profile_id = "132f5b8a-3f50-44ce-8bae-8a4d0520fc91"
+    process_urls(incogniton_profile_id)  # Remove the 'num_urls' argument since it's not used
+
+if __name__ == "__main__":
+    main()

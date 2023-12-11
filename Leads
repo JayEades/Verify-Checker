@@ -1,0 +1,104 @@
+import requests
+from airtable import Airtable
+
+# Airtable Config
+API_KEY = 'keypRV2FeRUvc7Zej'
+BASE_ID = 'appZWhRfPBEQYLEuM'
+TABLE_NAME = 'Source Accounts'
+LEADS_TABLE_NAME = 'Leads'
+
+# API Config
+URL = "https://instagram-scraper-2022.p.rapidapi.com/ig/following/"
+HEADERS = {
+    "X-RapidAPI-Key": "8db7b85525msh4a1948a9e15e660p166ac8jsn7410fa24bdb4",
+    "X-RapidAPI-Host": "instagram-scraper-2022.p.rapidapi.com"
+}
+
+# Initialize the Airtable object
+airtable = Airtable(BASE_ID, TABLE_NAME, api_key=API_KEY)
+leads_airtable = Airtable(BASE_ID, LEADS_TABLE_NAME, api_key=API_KEY)
+
+def get_usernames_and_ids():
+    records = airtable.get_all(fields=['user_id', 'max_id'])
+    user_info = []
+    for record in records:
+        fields = record['fields']
+        if 'user_id' in fields:
+            user_data = {
+                'user_id': fields['user_id'],
+                'record_id': record['id']
+            }
+            if 'max_id' in fields:
+                user_data['_max_id'] = fields['max_id']
+            user_info.append(user_data)
+    return user_info
+
+def fetch_followers(user_id, max_id=None):
+    url = "https://instagram-scraper-2022.p.rapidapi.com/ig/following/"
+    querystring = {'id_user': user_id}
+    if max_id:
+        querystring['next_max_id'] = max_id
+    
+    response = requests.get(url, headers=HEADERS, params=querystring)
+    if response.status_code == 200:
+        user_details = response.json()
+        # ... remaining logic here ...
+
+        if 'next_max_id' in user_details:
+            next_max_id = user_details['next_max_id']
+            user_info = get_usernames_and_ids()
+            record_id = next((user['record_id'] for user in user_info if user['user_id'] == user_id), None)
+            if record_id:
+                update_max_id_in_airtable(record_id, next_max_id)
+                
+        insert_full_user_data(user_details)
+
+def update_max_id_in_airtable(record_id, new_max_id):
+    airtable.update(record_id, {'max_id': new_max_id})
+
+def insert_full_user_data(user_details):
+    new_usernames = {user['username'] for user in user_details['users'] if 'username' in user}
+    
+    existing_records = leads_airtable.get_all(fields=['Username'])
+    existing_usernames = {record['fields']['Username']: record['id'] for record in existing_records if 'Username' in record['fields']}
+    unique_new_usernames = new_usernames - set(existing_usernames.keys())
+
+    for username in unique_new_usernames:
+        user_info = get_user_info(username)
+        if user_info:
+            leads_airtable.insert(user_info)
+
+def get_user_info(username):
+    url = "https://instagram-scraper-2022.p.rapidapi.com/ig/info_username/"
+    querystring = {"user": username}
+
+    response = requests.get(url, headers=HEADERS, params=querystring)
+    if response.status_code == 200:
+        user_data = response.json()['user']
+        return {
+            'Username': username,
+            'Followers': user_data['follower_count'],
+            'Following': user_data['following_count'],
+            'Bio': user_data['biography'],
+            'Link in bio': user_data['external_url'],
+            'Posts' : user_data['media_count'],
+            'Profile Pic': [{'url': user_data['hd_profile_pic_url_info']['url']}],
+            'user_id': user_data['pk'],
+            'Private ?': user_data['is_private'],
+            'Verified ?': user_data['is_verified'],
+            'Business ?': user_data['is_business'],
+        }
+    else:
+        print(f"Failed to retrieve details for {username}. Status code: {response.status_code}")
+        return None
+
+def process_user_data():
+    user_data = get_usernames_and_ids()
+    for user in user_data:
+        user_id = user.get('user_id')
+        max_id = user.get('_max_id')
+        print(max_id)
+        fetch_followers(user_id, max_id)
+
+if __name__ == "__main__":
+    process_user_data()
